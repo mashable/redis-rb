@@ -253,13 +253,58 @@ class SentinelTest < Test::Unit::TestCase
     assert_match(/No sentinels available/, ex.message)
   end
 
+  def test_sentinel_nearest
+    sentinels = [{:host => "127.0.0.1", :port => 26381}]
+
+    master = { :role => lambda { ["master"] }, :node_id => lambda { ["master"] }, :ping => lambda { ["OK"] } }
+    s1     = { :role => lambda { ["slave"] }, :node_id => lambda { ["1"] }, :ping => lambda { sleep 0.1; ["OK"] } }
+    s2     = { :role => lambda { ["slave"] }, :node_id => lambda { ["2"] }, :ping => lambda { sleep 0.2; ["OK"] } }
+    s3     = { :role => lambda { ["slave"] }, :node_id => lambda { ["3"] }, :ping => lambda { sleep 0.3; ["OK"] } }
+
+    5.times do
+      RedisMock.start(master) do |master_port|
+        RedisMock.start(s1) do |s1_port|
+          RedisMock.start(s2) do |s2_port|
+            RedisMock.start(s3) do |s3_port|
+
+              sentinel = lambda do |port|
+                {
+                  :sentinel => lambda do |command, *args|
+                    case command
+                    when "master"
+                      %W[role-reported master ip 127.0.0.1 port #{master_port}]
+                    when "slaves"
+                      [
+                        %W[master-link-status down ip 127.0.0.1 port #{s1_port}],
+                        %W[master-link-status ok ip 127.0.0.1 port #{s2_port}],
+                        %W[master-link-status ok ip 127.0.0.1 port #{s3_port}]
+                      ].shuffle
+                    else
+                      ["127.0.0.1", port.to_s]
+                    end
+                  end
+                }
+              end
+
+              RedisMock.start(sentinel.call(master_port)) do |sen_port|
+                sentinels[0][:port] = sen_port
+                redis = Redis.new(:url => "redis://master1", :sentinels => sentinels, :role => :nearest)
+                assert_equal ["master"], redis.node_id
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_sentinel_nearest_slave
     sentinels = [{:host => "127.0.0.1", :port => 26381}]
 
     master = { :role => lambda { ["master"] } }
-    s1 = { :role => lambda { ["slave"] }, :slave_id => lambda { ["1"] }, :ping => lambda { ["OK"] } }
-    s2 = { :role => lambda { ["slave"] }, :slave_id => lambda { ["2"] }, :ping => lambda { sleep 0.1; ["OK"] } }
-    s3 = { :role => lambda { ["slave"] }, :slave_id => lambda { ["3"] }, :ping => lambda { sleep 0.2; ["OK"] } }
+    s1 = { :role => lambda { ["slave"] }, :node_id => lambda { ["1"] }, :ping => lambda { ["OK"] } }
+    s2 = { :role => lambda { ["slave"] }, :node_id => lambda { ["2"] }, :ping => lambda { sleep 0.1; ["OK"] } }
+    s3 = { :role => lambda { ["slave"] }, :node_id => lambda { ["3"] }, :ping => lambda { sleep 0.2; ["OK"] } }
 
     5.times do
       RedisMock.start(master) do |master_port|
@@ -287,7 +332,7 @@ class SentinelTest < Test::Unit::TestCase
               RedisMock.start(sentinel.call(master_port)) do |sen_port|
                 sentinels[0][:port] = sen_port
                 redis = Redis.new(:url => "redis://master1", :sentinels => sentinels, :role => :nearest_slave)
-                assert_equal redis.slave_id, ["2"]
+                assert_equal redis.node_id, ["2"]
               end
             end
           end
